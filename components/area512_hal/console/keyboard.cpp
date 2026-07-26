@@ -778,90 +778,135 @@ cardputer_handle_i2c_error(void) {
   cardputer_configure_tca8418();
 }
 
-bool
-keyboard_init(void) {
-  uint8_t probe = 0;
+static const gpio_num_t row_pins[3] = {
+    GPIO_NUM_8,
+    GPIO_NUM_9,
+    GPIO_NUM_11,
+};
 
-  if (!tca8418_read_register(TCA8418_REG_CFG, &probe)) {
-    ESP_LOGW(
-      TAG,
-      "TCA8418 not responding on M5.In_I2C (addr=0x%02x)",
-      TCA8418_ADDR
-    );
+static const gpio_num_t col_pins[7] = {
+    GPIO_NUM_13,
+    GPIO_NUM_15,
+    GPIO_NUM_3,
+    GPIO_NUM_4,
+    GPIO_NUM_5,
+    GPIO_NUM_6,
+    GPIO_NUM_7,
+};
 
-    return false;
-  }
+typedef struct {
+    uint8_t even;
+    uint8_t odd;
+} xmap_t;
 
-  return cardputer_configure_tca8418();
+static const xmap_t X_map[7] = {
+    {0,1},
+    {2,3},
+    {4,5},
+    {6,7},
+    {8,9},
+    {10,11},
+    {12,13},
+};
+
+static bool input_is_initialized = false;
+
+void rg_input_init_cardputer(void)
+{
+    gpio_config_t out = {
+        .pin_bit_mask = 0,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    for (int i = 0; i < 3; i++)
+        out.pin_bit_mask |= (1ULL << row_pins[i]);
+
+    gpio_config(&out);
+
+    for (int i = 0; i < 3; i++)
+        gpio_set_level(row_pins[i], 0);
+
+    gpio_config_t in = {
+        .pin_bit_mask = 0,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    for (int i = 0; i < 7; i++)
+        in.pin_bit_mask |= (1ULL << col_pins[i]);
+
+    gpio_config(&in);
+
+    input_is_initialized = true;
 }
 
-void
-keyboard_poll(void) {
-  uint8_t interrupt_status = 0;
+bool keyboard_init(void) {
+    // Inicializa os pinos GPIO da matriz do Cardputer v1.1
+    rg_input_init_cardputer();
+    return true;
+}
 
-  if (!tca8418_read_register(TCA8418_REG_INT_STAT, &interrupt_status)) {
-    cardputer_clear_repeat_state();
-    cardputer_handle_i2c_error();
+#define MAX_KEY_CODES 80
 
-    return;
-  }
+void keyboard_poll(void) {
+    bool current_scan[MAX_KEY_CODES] = {0};
 
-  bool i2c_ok = true;
+    // Varre a matriz de pinos GPIO (Cardputer v1.1)
+    for (int i = 0; i < 8; i++) {
+        gpio_set_level(row_pins[0], (i >> 0) & 1);
+        gpio_set_level(row_pins[1], (i >> 1) & 1);
+        gpio_set_level(row_pins[2], (i >> 2) & 1);
 
-  // The event-count register is unreliable; drain KEY_EVENT_A until it
-  // reads 0 (FIFO empty), up to the FIFO depth.
-  for (int i = 0; i < TCA8418_FIFO_DEPTH; ++i) {
-    uint8_t event = 0;
+        esp_rom_delay_us(5);
 
-    if (!tca8418_read_register(TCA8418_KEY_EVENT_A, &event)) {
-      // This read may have dropped a key-up; clear repeat state before
-      // bailing.
-      cardputer_clear_repeat_state();
+        for (int j = 0; j < 7; j++) {
+            // Se o pino estiver HIGH, a tecla NÃO está pressionada
+            if (gpio_get_level(col_pins[j])) {
+                continue;
+            }
 
-      i2c_ok = false;
+            // Calcula a linha (0 a 3) e coluna (0 a 13) físicas do Cardputer v1.1
+            int y_scan = (i > 3) ? (i - 4) : i;
+            int row = 3 - y_scan;
 
-      cardputer_handle_i2c_error();
+            int col = (i > 3)
+                    ? X_map[j].even
+                    : X_map[j].odd;
 
-      break;
+            // Traduz (row, col) para o 'code' do TCA8418 esperado pelo cardputer_lookup_key
+            uint8_t code = (col / 2) * 10 + 1 + (col % 2) * 4 + row;
+
+            if (code < MAX_KEY_CODES) {
+                current_scan[code] = true;
+            }
+        }
     }
 
-    if (event == 0x00) {
-      break;
+    // Reseta o nível das linhas após a varredura
+    for (int i = 0; i < 3; i++) {
+        gpio_set_level(row_pins[i], 0);
     }
 
-    uint8_t code = event & TCA8418_KEY_CODE_MASK;
-    bool pressed = (event & TCA8418_KEY_PRESSED_BIT) != 0;
+    // Compara com o estado anterior e dispara os eventos de tecla
+    for (int code = 0; code < MAX_KEY_CODES; code++) {
+        bool pressed = current_scan[code];
+        if (pressed != s_cardputer_key_down[code]) {
+            s_cardputer_key_down[code] = pressed;
 
-    s_cardputer_key_down[code] = pressed;
+            if (pressed) {
+                cardputer_set_repeat_key(code);
+            } else {
+                cardputer_clear_repeat_key(code);
+            }
 
-    if (pressed) {
-      cardputer_set_repeat_key(code);
-    } else {
-      cardputer_clear_repeat_key(code);
+            cardputer_handle_key(code, pressed);
+        }
     }
 
-    cardputer_handle_key(code, pressed);
-  }
-
-  if (interrupt_status & (TCA8418_INT_KEY | TCA8418_INT_OVERFLOW)) {
-    if (interrupt_status & TCA8418_INT_OVERFLOW) {
-      cardputer_reset_local_state();
-    }
-
-    if (!tca8418_write_register(
-          TCA8418_REG_INT_STAT,
-          (uint8_t)(TCA8418_INT_KEY | TCA8418_INT_OVERFLOW)
-        )) {
-
-      i2c_ok = false;
-
-      cardputer_handle_i2c_error();
-    }
-  }
-
-  if (i2c_ok) {
-    s_cardputer_i2c_error_count = 0;
-  }
-
-  cardputer_update_repeat();
+    cardputer_update_repeat();
 }
