@@ -5,12 +5,10 @@ module Kernel
   def p: (*untyped objects) -> self
 
   # Output object
-  def print: (untyped object) -> nil
+  def print: (*untyped objects) -> nil
 
   # Output object with newline
   def puts: (*untyped objects) -> nil
-
-  def system: (String command) -> bool
 
   def yield: (*untyped arguments) -> self
 

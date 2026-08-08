@@ -7,13 +7,13 @@
 static void
 test_string_method_lookup(void) {
   const TiBuiltinMethod *method =
-    ti_get_builtin_instance_method(TI_CLASS_STRING, (const uint8_t *)"sub", 3);
+    ti_get_builtin_instance_method(TI_CLASS_STRING, (const uint8_t *)"tr", 2);
 
   assert(method);
   assert(
     strcmp(
       ti_get_builtin_signature(method),
-      "sub: (String pattern, String replacement) -> String"
+      "tr: (String source, String replacement) -> String"
     ) == 0
   );
 }
@@ -61,6 +61,28 @@ test_union_return_type(void) {
 }
 
 static void
+test_builtin_argument_type(void) {
+  const TiBuiltinMethod *method =
+    ti_get_builtin_instance_method(TI_CLASS_STRING, (const uint8_t *)"tr", 2);
+
+  assert(method);
+  assert(method->argument_count == 2);
+
+  const TiBuiltinArgument *first_argument =
+    ti_get_builtin_argument(method, 0);
+  uint8_t class_identifiers[4] = {0};
+
+  assert(first_argument);
+  assert(
+    ti_get_builtin_argument_classes(
+      first_argument,
+      class_identifiers
+    ) == 1
+  );
+  assert(class_identifiers[0] == TI_CLASS_STRING);
+}
+
+static void
 test_prefix_lookup(void) {
   const TiBuiltinMethod *methods[64];
   int count = ti_collect_builtin_methods_matching_partial_method_name(
@@ -77,7 +99,6 @@ test_prefix_lookup(void) {
   int found_size = 0;
   int found_slice = 0;
   int found_split = 0;
-  int found_sub = 0;
   for (int index = 0; index < count; index++) {
     const char *name = ti_get_builtin_method_name(methods[index]);
 
@@ -91,14 +112,11 @@ test_prefix_lookup(void) {
       found_size = 1;
     if (strcmp(name, "slice") == 0)
       found_slice = 1;
-    if (strcmp(name, "sub") == 0)
-      found_sub = 1;
   }
 
   assert(found_size);
   assert(found_slice);
   assert(found_split);
-  assert(found_sub);
 }
 
 static void
@@ -135,6 +153,20 @@ test_pool_boundaries(void) {
       ti_builtin_document_pool_size - method->document_offset
     ));
   }
+
+  for (uint16_t index = 0; index < ti_builtin_argument_count; index++) {
+    const TiBuiltinArgument *argument = &ti_builtin_arguments[index];
+
+    assert(argument->name_offset < ti_builtin_name_pool_size);
+
+    if (argument->name_offset != 0) {
+      assert(memchr(
+        ti_builtin_name_pool + argument->name_offset,
+        '\0',
+        ti_builtin_name_pool_size - argument->name_offset
+      ));
+    }
+  }
 }
 
 int
@@ -143,6 +175,7 @@ main(void) {
   test_flattened_methods();
   test_array_reference_return_type();
   test_union_return_type();
+  test_builtin_argument_type();
   test_prefix_lookup();
   test_pool_boundaries();
 
